@@ -1,0 +1,7 @@
+node_modules/
+.env
+faiss-store/
+models/
+*.log
+.DS_Store
+
