@@ -1,6 +1,6 @@
 # LLM RAG Project
 
-A Node.js application that implements Retrieval-Augmented Generation (RAG) using:
+A NestJS REST API application that implements Retrieval-Augmented Generation (RAG) using:
 - **RakutenAI-2.0-mini-instruct** (GGUF format) for CPU-based LLM inference via `node-llama-cpp`
 - **Faiss** vector store for efficient similarity search via LangChain
 - **@xenova/transformers** for local embeddings
@@ -9,10 +9,12 @@ A Node.js application that implements Retrieval-Augmented Generation (RAG) using
 
 - Pure Node.js implementation (no Python required)
 - CPU-based inference for both LLM and embeddings
-- Interactive CLI chat interface
+- **Server-Sent Events (SSE) API** for streaming chat responses
+- REST API endpoints for health checks and warm-up
 - Automatic document loading and chunking
 - Persistent Faiss index for faster subsequent loads
 - Configurable via environment variables
+- Lazy initialization with on-demand warm-up for cold start optimization
 
 ## Prerequisites
 
@@ -141,43 +143,189 @@ TEMPERATURE=0.7
 
 ## Usage
 
-Start the application:
+### Starting the Server
+
+Start the NestJS application:
 ```bash
+# Development mode (with hot reload)
+npm run start:dev
+
+# Production mode
 npm start
 ```
 
-The system will:
-1. Load the GGUF model (first time may take a moment)
-2. Initialize the embedding model
-3. Load or create the Faiss vector store
-4. If no index exists, it will process documents from `knowledge-base/`
+The server will start on `http://localhost:3000` (or the port specified in `PORT` environment variable).
 
-Once ready, you can start chatting:
-```
-You: What is the capital of France?
-AI: [Response based on knowledge base and model]
+### API Endpoints
+
+#### 1. Health Check
+Check if the RAG system is initialized and ready:
+```bash
+GET /health
 ```
 
-Type `exit` or `quit` to stop the application.
+**Response (200 OK - Ready):**
+```json
+{
+  "status": "healthy",
+  "rag": {
+    "initialized": true,
+    "ready": true
+  },
+  "timestamp": "2025-12-10T14:30:00.000Z"
+}
+```
+
+**Response (503 Service Unavailable - Not Ready):**
+```json
+{
+  "status": "unhealthy",
+  "rag": {
+    "initialized": false,
+    "ready": false
+  },
+  "timestamp": "2025-12-10T14:30:00.000Z"
+}
+```
+
+#### 2. Warm-up Endpoint
+Initialize the RAG system on demand (useful for cold start optimization):
+```bash
+POST /warmup
+```
+
+**Response (200 OK):**
+```json
+{
+  "status": "success",
+  "message": "RAG system initialized successfully",
+  "timestamp": "2025-12-10T14:30:00.000Z"
+}
+```
+
+If already initialized:
+```json
+{
+  "status": "success",
+  "message": "RAG system is already initialized",
+  "timestamp": "2025-12-10T14:30:00.000Z"
+}
+```
+
+#### 3. Chat Stream (SSE)
+Stream chat responses using Server-Sent Events:
+```bash
+POST /chat/stream
+Content-Type: application/json
+
+{
+  "query": "What is the capital of France?",
+  "topK": 3  // optional, defaults to configured TOP_K
+}
+```
+
+**Response:** Server-Sent Events stream with the following event types:
+
+- `chunk`: Token chunk from the streaming response
+  ```
+  data: {"type":"chunk","content":"Paris"}
+  ```
+
+- `done`: Stream completed
+  ```
+  data: {"type":"done","message":"Stream completed"}
+  ```
+
+- `error`: Error occurred
+  ```
+  data: {"type":"error","message":"Error description"}
+  ```
+
+**Example using curl:**
+```bash
+curl -N -X POST http://localhost:3000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the capital of France?"}'
+```
+
+**Example using JavaScript (EventSource for GET or fetch for POST):**
+```javascript
+// Using fetch for POST with SSE
+const response = await fetch('http://localhost:3000/chat/stream', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: 'What is the capital of France?' })
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  
+  const chunk = decoder.decode(value);
+  const lines = chunk.split('\n');
+  
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.slice(6));
+      if (data.type === 'chunk') {
+        process.stdout.write(data.content);
+      } else if (data.type === 'done') {
+        console.log('\nStream completed');
+      } else if (data.type === 'error') {
+        console.error('Error:', data.message);
+      }
+    }
+  }
+}
+```
+
+### Initialization Flow
+
+The RAG system uses **lazy initialization**:
+1. The server starts immediately without loading models
+2. On first chat request or when calling `/warmup`, the system will:
+   - Load the GGUF model (first time may take a moment)
+   - Initialize the embedding model
+   - Load or create the Faiss vector store
+   - If no index exists, it will process documents from `knowledge-base/`
+3. Subsequent requests use the initialized system
+
+This allows the server to start quickly and initialize on-demand, which is ideal for serverless or containerized deployments.
 
 ## Project Structure
 
 ```
 llm-rag/
 ├── src/
-│   ├── index.js              # Main CLI entry point
+│   ├── main.ts               # NestJS application entry point
+│   ├── app.module.ts         # Root application module
+│   ├── app.controller.ts     # Root controller
+│   ├── app.service.ts        # Root service
+│   ├── index.js              # Legacy CLI entry point (optional)
 │   ├── llm/
 │   │   ├── modelLoader.js    # Model loading with node-llama-cpp
-│   │   └── llamaAdapter.js   # LangChain adapter for node-llama-cpp
+│   │   └── llamaAdapter.js   # LangChain adapter with streaming support
 │   ├── rag/
+│   │   ├── rag.service.ts    # RAG system management service
+│   │   ├── rag.controller.ts # Warm-up endpoint controller
+│   │   ├── rag.module.ts     # RAG module
 │   │   ├── vectorStore.js    # Faiss vector store management
 │   │   ├── embeddings.js     # Custom embeddings with @xenova/transformers
 │   │   └── documentLoader.js # Document loading and chunking
-│   └── chat/
-│       └── chatHandler.js    # RAG pipeline orchestration
+│   ├── chat/
+│   │   ├── chat.controller.ts # SSE chat endpoint controller
+│   │   ├── chat.module.ts     # Chat module
+│   │   └── chatHandler.js     # RAG pipeline orchestration with streaming
+│   └── health/
+│       ├── health.controller.ts # Health check endpoint
+│       └── health.module.ts     # Health module
 ├── knowledge-base/           # Place your documents here (.txt, .md)
 ├── faiss-store/              # Generated Faiss index (auto-created)
 ├── models/                   # Place GGUF model file here
+├── dist/                     # Compiled output (generated)
 └── package.json
 ```
 
@@ -185,6 +333,7 @@ llm-rag/
 
 All configuration is done via environment variables (see `.env.example`):
 
+- `PORT`: Server port (default: 3000)
 - `MODEL_PATH`: Path to the GGUF model file
 - `EMBEDDING_MODEL`: Embedding model name (default: Xenova/all-MiniLM-L6-v2)
 - `KNOWLEDGE_BASE_DIR`: Directory containing knowledge base documents
@@ -235,13 +384,74 @@ All configuration is done via environment variables (see `.env.example`):
 
 **Slow performance**: CPU inference is slower than GPU. Consider using a smaller model or quantization.
 
+**Module not found errors**: 
+- Make sure to run `npm run build` after making changes
+- The build process copies JavaScript files to the `dist/` folder
+- If issues persist, delete `dist/` and `node_modules/`, then run `npm install` and `npm run build` again
+
+**Port already in use**: 
+- Change the `PORT` environment variable or stop the process using port 3000
+- Check running processes: `lsof -i :3000` (macOS/Linux) or `netstat -ano | findstr :3000` (Windows)
+
+**SSE connection issues**: 
+- Ensure CORS is properly configured if accessing from a browser
+- Check that the client supports Server-Sent Events
+- For POST requests with SSE, use `fetch` API or a library that supports POST with streaming responses
+
 ## License
 
 ISC
 
+## Development
+
+### Building the Project
+
+```bash
+# Build TypeScript to JavaScript
+npm run build
+
+# Build output goes to dist/
+```
+
+### Running in Development Mode
+
+```bash
+# Start with hot reload (watches for file changes)
+npm run start:dev
+
+# Start in debug mode
+npm run start:debug
+```
+
+### Testing the API
+
+After starting the server, you can test the endpoints:
+
+```bash
+# Check health
+curl http://localhost:3000/health
+
+# Warm up the system
+curl -X POST http://localhost:3000/warmup
+
+# Test chat stream
+curl -N -X POST http://localhost:3000/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Hello, how are you?"}'
+```
+
+## Architecture Notes
+
+- **Lazy Initialization**: The RAG system initializes on first use or when `/warmup` is called, allowing fast server startup
+- **Streaming Responses**: Chat responses are streamed token-by-token using Server-Sent Events for real-time user experience
+- **Module System**: TypeScript NestJS modules import JavaScript ES modules using dynamic imports
+- **Singleton Pattern**: RAG service maintains singleton instances of LLM, vector store, and chat handler
+
 ## References
 
+- [NestJS Documentation](https://docs.nestjs.com/)
 - [LangChain.js FaissStore Documentation](https://docs.langchain.com/oss/javascript/integrations/vectorstores/faiss)
 - [node-llama-cpp Documentation](https://node-llama-cpp.withcat.ai/)
 - [RakutenAI-2.0-mini-instruct-gguf Model](https://huggingface.co/mmnga/RakutenAI-2.0-mini-instruct-gguf)
+- [Server-Sent Events (SSE) Specification](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
 

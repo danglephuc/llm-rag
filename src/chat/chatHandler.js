@@ -53,5 +53,49 @@ Answer the user's question based on the context provided above.`;
       throw error;
     }
   }
+
+  /**
+   * Stream a response using RAG
+   * @param {string} query - User query
+   * @param {number} topK - Number of documents to retrieve
+   * @returns {AsyncGenerator<string>} - Stream of response chunks
+   */
+  async *streamResponse(query, topK = 3) {
+    try {
+      // Step 1: Retrieve relevant documents from vector store
+      console.log(`Retrieving top ${topK} relevant documents for query: "${query}"`);
+      const relevantDocs = await similaritySearch(this.vectorStore, query, topK);
+      
+      // Step 2: Construct context from retrieved documents
+      const context = relevantDocs
+        .map((doc, index) => `[Document ${index + 1}]\n${doc.pageContent}`)
+        .join('\n\n');
+
+      // Step 3: Construct prompt with context and query
+      const systemPrompt = `You are a helpful assistant. Use the following context to answer the user's question. If the context doesn't contain relevant information, use your knowledge to provide a helpful response.
+
+Context:
+${context}
+
+Answer the user's question based on the context provided above.`;
+
+      const messages = [
+        new SystemMessage(systemPrompt),
+        new HumanMessage(query),
+      ];
+
+      // Step 4: Stream response using LLM
+      console.log('Generating response...');
+      for await (const chunk of this.llm._streamResponseChunks(messages)) {
+        const text = chunk.text || '';
+        if (text) {
+          yield text;
+        }
+      }
+    } catch (error) {
+      console.error('Error streaming response:', error);
+      throw error;
+    }
+  }
 }
 

@@ -99,18 +99,55 @@ export class ChatLlamaCpp extends BaseChatModel {
     const maxTokens = options.maxTokens || this.maxTokens;
     const temperature = options.temperature !== undefined ? options.temperature : this.temperature;
 
-    // For now, return a single chunk (streaming can be enhanced later)
-    const response = await this.chatSession.prompt(prompt, {
-      maxTokens,
-      temperature,
-      topP: 0.9,
-      topK: 40,
-    });
+    // Use a queue-based approach for streaming
+    const chunkQueue = [];
+    let isComplete = false;
+    let streamingError = null;
 
-    yield new ChatGenerationChunk({
-      text: response,
-      message: new AIMessage(response),
-    });
+    // Start the streaming in the background
+    const streamingPromise = this.chatSession
+      .completePrompt(prompt, {
+        maxTokens,
+        temperature,
+        topP: 0.9,
+        topK: 40,
+        onTextChunk: (chunk) => {
+          // Push chunks to the queue as they arrive
+          chunkQueue.push(chunk);
+        },
+      })
+      .then(() => {
+        isComplete = true;
+      })
+      .catch((err) => {
+        streamingError = err;
+        isComplete = true;
+      });
+
+    // Yield chunks from the queue as they arrive
+    while (!isComplete || chunkQueue.length > 0) {
+      if (chunkQueue.length > 0) {
+        const chunk = chunkQueue.shift();
+        yield new ChatGenerationChunk({
+          text: chunk,
+          message: new AIMessage(chunk),
+        });
+      } else if (!isComplete) {
+        // Wait a bit before checking again
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+
+    // Wait for the streaming to complete and handle any errors
+    try {
+      await streamingPromise;
+    } catch (err) {
+      // Error already captured in streamingError
+    }
+
+    if (streamingError) {
+      throw new Error(`Streaming error: ${streamingError.message}`);
+    }
   }
 }
 
